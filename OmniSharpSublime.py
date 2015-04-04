@@ -1,8 +1,6 @@
 import sublime_plugin, sublime, os, sys, re, urllib, urllib.parse, threading, socket, json
 
-from time import time
 
-from .lib.urllib3 import PoolManager
 
 IS_EXTERNAL_SERVER_ENABLE = False
 AC_OPTS = sublime.INHIBIT_WORD_COMPLETIONS | sublime.INHIBIT_EXPLICIT_COMPLETIONS
@@ -16,19 +14,13 @@ server_ports = {
 if sys.version_info < (3, 3):
     raise RuntimeError('OmniSharpSublime works with Sublime Text 3 only')
 
-pool = PoolManager(headers={'Content-Type': 'application/json; charset=UTF-8'})
     
-def plugin_loaded():
-    print('omnisharp plugin_loaded')
-    settings = sublime.load_settings('OmniSharpSublime.sublime-settings')
-    configpath = settings.get("omnisharp_server_config_location")
-    if not configpath:
-        settings.set("omnisharp_server_config_location", sublime.packages_path() + os.path.sep + "OmniSharp" + os.path.sep + "PrebuiltOmniSharpServer" + os.path.sep + "config.json")
-        sublime.save_settings('OmniSharpSublime.sublime-settings')
+from time import time
 
-def plugin_unloaded():
-    print('omnisharp plugin_unloaded')
+from .lib.urllib3 import PoolManager
     
+pool = PoolManager(headers={'Content-Type': 'application/json; charset=UTF-8'})
+
 class OmniSharpServerRunnerEventListener(sublime_plugin.EventListener):
     def on_activated(self, view):
         if not is_csharp(view):
@@ -48,8 +40,6 @@ class OmniSharpAddFileToProjectEventListener(sublime_plugin.EventListener):
         print(data)
 
 class OmniSharpOverrideListener(sublime_plugin.EventListener):
-    view = None
-
     def on_modified(self, view):
         if not is_csharp(view):
             return
@@ -65,7 +55,6 @@ class OmniSharpOverrideListener(sublime_plugin.EventListener):
         view.run_command('omni_sharp_override_targets')
         
 class OmniSharpTooltipListener(sublime_plugin.EventListener):
-
     def on_activated_async(self, view):
         self._check_tooltip(view)
 
@@ -81,7 +70,7 @@ class OmniSharpTooltipListener(sublime_plugin.EventListener):
         if view_settings.get('is_widget'):
             return
 
-        oops_map = view.settings().get("oops")
+        oops_map = view_settings.get("oops")
         if None == oops_map:
             return
 
@@ -109,7 +98,6 @@ class OmniSharpTooltipListener(sublime_plugin.EventListener):
     def on_navigate(self, link):
         return
 
-        
 class OmniSharpSyntaxEventListener(sublime_plugin.EventListener):
     data = None
     view = None
@@ -139,7 +127,7 @@ class OmniSharpSyntaxEventListener(sublime_plugin.EventListener):
         self.outputpanel.run_command('erase_view')
 
         self.view.erase_regions("oops")
-        if bool(get_settings(view, 'omnisharp_onsave_codecheck')):
+        if settings_manager.codecheck_on_save:
             get_response(view, '/codecheck', self._handle_codeerrors)
 
         print('file changed')
@@ -150,12 +138,11 @@ class OmniSharpSyntaxEventListener(sublime_plugin.EventListener):
             print('no data')
             return
         
-        self.data = data
         self.underlines = []
         oops_map = {}
 
-        if "QuickFixes" in self.data and self.data["QuickFixes"] != None and len(self.data["QuickFixes"]) > 0:
-            for i in self.data["QuickFixes"]:
+        if "QuickFixes" in data and data["QuickFixes"] != None and len(data["QuickFixes"]) > 0:
+            for i in data["QuickFixes"]:
                 point = self.view.text_point(i["Line"]-1, i["Column"])
                 reg = self.view.word(point)
                 self.underlines.append(reg)
@@ -166,11 +153,8 @@ class OmniSharpSyntaxEventListener(sublime_plugin.EventListener):
                 print('underlines')
                 self.view.settings().set("oops", oops_map)
                 self.view.add_regions("oops", self.underlines, "illegal", "", sublime.DRAW_NO_FILL + sublime.DRAW_NO_OUTLINE + sublime.DRAW_SQUIGGLY_UNDERLINE)
-                if bool(get_settings(self.view,'omnisharp_onsave_showerrorwindows')):
+                if settings_manager.show_error_window_on_save:
                     self.view.window().run_command("show_panel", {"panel": "output.variable_get"})
-
-        self.data = None
-
 
 class OmniSharpCompletionEventListener(sublime_plugin.EventListener):
 
@@ -232,7 +216,19 @@ class OmniSharpCompletionEventListener(sublime_plugin.EventListener):
 
         return (display, completionText)
 
+class SettingsManager():
+
+    def __init__(self):
+        self._settings = sublime.load_settings('OmniSharpSublime.sublime-settings')
+        self._settings_config_path = self._settings.get("omnisharp_server_config_location")
         
+        self.timeout = int(self._settings.get('omnisharp_response_timeout', 10))
+        self.server_cofiguration_path = self._settings.get('omnisharp_server_config_location')
+        self.codecheck_on_save = bool(self._settings.get('omnisharp_onsave_codecheck', True))
+        self.show_error_window_on_save = bool(self._settings.get('omnisharp_onsave_showerrorwindows', True))
+        
+settings_manager = SettingsManager()
+
 def hide_auto_complete(view):
     view.run_command('hide_auto_complete')
 
@@ -243,12 +239,6 @@ def is_csharp(view):
         return False
 
     return view.match_selector(location, 'source.cs')
-
-
-def get_settings(view, name, default=None):
-    settings = sublime.load_settings('OmniSharpSublime.sublime-settings')
-    from_plugin = settings.get(name, default)
-    return view.settings().get(name, from_plugin)
 
 def active_view():
     return sublime.active_window().active_view()
@@ -323,7 +313,7 @@ def get_response(view, endpoint, callback, params=None, timeout=None):
         parameters.update(params)
 
     if timeout is None:
-        timeout = int(get_settings(view, 'omnisharp_response_timeout'))
+        timeout = settings_manager.timeout
         
     host = 'localhost'
     port = server_ports[solution_path]
@@ -356,9 +346,6 @@ def create_omnisharp_server_subprocess(view):
     omni_port = _available_port()
     print('omni_port:%s' % omni_port)
     
-    
-    config_file = get_settings(view, "omnisharp_server_config_location")
-
     if IS_EXTERNAL_SERVER_ENABLE:
         launcher_proc = None
         omni_port = 2000
@@ -371,7 +358,7 @@ def create_omnisharp_server_subprocess(view):
                 omni_exe_path, 
                 '-s', '"' + solution_path + '"',
                 '-p', str(omni_port),
-                '-config', '"' + config_file + '"',
+                '-config', '"' + settings_manager.server_cofiguration_path + '"',
                 '--hostPID', str(os.getpid())
             ]
 
